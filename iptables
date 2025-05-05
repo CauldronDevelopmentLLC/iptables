@@ -1,12 +1,15 @@
 #!/bin/bash
+
+################################################################################
 #
-#   Firewall configuration
-#     -Firewall external interface
+#  IPv4 & IPv6 firewall configuration using iptables.
+#
+#  Copyright: 2004-2025 Joseph Coffland
 #
 #  Add to system with:
+#
 #    sudo update-rc.d iptables defaults 13 87
 #
-#  Copyright: 2004-2010 Joseph Coffland
 ################################################################################
 
 ### BEGIN INIT INFO
@@ -21,6 +24,7 @@
 # Description:       A firewall script
 ### END INIT INFO
 
+################################################################################
 # Defaults
 
 EXTIF="eth0"
@@ -35,173 +39,277 @@ PING=false
 LOG=false
 
 IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
 
 start_local() {
-    true
+  true
 }
 
 ################################################################################
 # Utility functions
+
+# print_bar <msg...>
+print_bar() {
+  LEN=$(echo -n "$@" | wc -c)
+  echo -n "$@ "
+  C=0
+  while [ $C -lt $((79 - $LEN)) ]; do
+    echo -n "*"
+    C=$(($C + 1))
+  done
+  echo
+}
+
+# tabbed_print <length> <msg...>
 tabbed_print() {
-    X=$1
-    shift
-    X=$(($X + `echo $@ | wc -c`))
-    
-    while [ $X -lt 80 ]; do
-        echo -n " "
-        X=$(($X + 1))
-    done
-    echo $@
+  X=$1
+  shift
+  X=$(($X + $(echo $@ | wc -c)))
+
+  while [ $X -lt 80 ]; do
+    echo -n " "
+    X=$(($X + 1))
+  done
+  echo $@
 }
 
+# action <msg> <command> [args...]
 action() {
-    LEN=`echo -n $1 | wc -c`
-    echo -n $1
-    shift
-    $@ >/dev/null 2>/dev/null
+  LEN=$(echo -n $1 | wc -c)
+  MSG=$1
+  shift
+
+  if [[ $VERBOSE == "true" ]]; then
+    print_bar "$MSG"
+    echo "@ $@"
+    $@
+
     if [ $? -eq 0 ]; then
-        tabbed_print $LEN OK
+      echo OK
     else
-        tabbed_print $LEN FAILED
+      echo FAILED
     fi
+    echo
+
+  else
+    echo -n "$MSG"
+    $@ >/dev/null 2>/dev/null
+
+    if [ $? -eq 0 ]; then
+      tabbed_print $LEN OK
+    else
+      tabbed_print $LEN FAILED
+    fi
+  fi
 }
 
+
+# iptables4and6 <command> [args...]
+iptables4and6() {
+  $IPTABLES "$@" && $IP6TABLES "$@"
+}
+
+# is_4or6 <ip>
+is_ip4() {
+  if [[ "$1" =~ ^[0-9/\.]+$ ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# print_4or6 <ip>
+print_4or6() {
+  if is_ip4 "$1"; then echo IPv4; else echo IPv6; fi
+}
+
+# iptables4or6 <ip> <command> [args...]
+iptables4or6() {
+  is_ip4 $1
+  ISIP4=$?
+  shift
+
+  if [[ $ISIP4 -eq 0 ]]; then
+    $IPTABLES "$@"
+
+  else
+    $IP6TABLES "$@"
+  fi
+}
+
+# load_mod <module>
 load_mod() {
-    /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
-    if test $? -ne 0; then
-	    action "Loading module: $1" /sbin/insmod $1
-    fi
+  /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
+  if [[ $? -ne 0 ]]; then
+	  action "Loading module: $1" /sbin/modprobe $1
+  fi
 }
 
+# unload_mod <module>
 unload_mod() {
-    /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
-    if test $? -eq 0; then
-	    action "Unloading module: $1" /sbin/rmmod $1
-    fi
+  /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
+  if [[ $? -eq 0 ]]; then
+	  action "Unloading module: $1" /sbin/modprobe -r $1
+  fi
+}
+
+_reset_iptables() {
+  iptables4and6 -P INPUT ACCEPT  && \
+  iptables4and6 -F INPUT         && \
+  iptables4and6 -P OUTPUT ACCEPT && \
+  iptables4and6 -F OUTPUT        && \
+  iptables4and6 -P FORWARD DROP  && \
+  iptables4and6 -F FORWARD       && \
+  iptables4and6 -t nat -F
 }
 
 reset_iptables() {
-    action "Clearing any existing rules and setting default policy" \
-        $IPTABLES -P INPUT ACCEPT && \
-        $IPTABLES -F INPUT && \
-        $IPTABLES -P OUTPUT ACCEPT && \
-        $IPTABLES -F OUTPUT && \
-        $IPTABLES -P FORWARD DROP && \
-        $IPTABLES -F FORWARD && \
-        $IPTABLES -t nat -F
-    echo
+  action "Clearing rules" _reset_iptables
 }
 
-# Syntax: allow_in <protocol> <port> <source>
+# allow_in <protocol> <port> <source>
 allow_in() {
-    action "Enabling $1 $2 input from $3" \
-        $IPTABLES -A INPUT -p "$1" --dport "$2" -s "$3" -j ACCEPT
+  action "Enabling $(print_4or6 "$3") $1 $2 input from $3" \
+    iptables4or6 "$3" -A INPUT -p "$1" --dport "$2" -s "$3" -j ACCEPT
 }
 
-# $1 is the internal interface to be masquraded
-# $2 is the external interface to the internet
+# block_ip <ip>
+block_ip() {
+  action "Disabling all $(print_4or6 "$1") input from $1" \
+    iptables4or6 "$1" -A INPUT -s $1 -j DROP
+}
+
+# allow_ip <ip>
+allow_ip() {
+  action "Enabling all $(print_4or6 "$1") input from $1" \
+    iptables4or6 "$1" -A INPUT -s "$1" -j ACCEPT
+}
+
+# allow_port <protocol> <port>
+allow_port() {
+  action "Enabling $1 $2 IPv4 & IPv6 input" \
+    iptables4and6 -A INPUT -p $1 --dport $2 -j ACCEPT
+}
+
+_masquerade() {
+  iptables4and6 -t nat -A POSTROUTING -o $2 -j MASQUERADE && \
+  iptables4and6 -A FORWARD -i $2 -o $1 -m state --state ESTABLISHED,RELATED \
+    -j ACCEPT && \
+  iptables4and6 -A FORWARD -i $1 -o $2 -j ACCEPT
+}
+
+# masquerade <internal> <external>
 masquerade() {
-    action "Masquerading $1 -> $2" \
-        $IPTABLES -t nat -A POSTROUTING -o $2 -j MASQUERADE && \
-        $IPTABLES -A FORWARD -i $2 -o $1 -m state --state ESTABLISHED,RELATED \
-        -j ACCEPT && \
-        $IPTABLES -A FORWARD -i $1 -o $2 -j ACCEPT
+  action "Masquerading $1 to $2" _masquerade "$1" "$2"
+}
+
+# enable_log <table>
+enable_log() {
+  action "Enabling $1 logging" iptables4and6 -A "$1" -j LOG
 }
 
 ################################################################################
 # Load config
+
 if [ -e /etc/default/iptables ]; then
-    . /etc/default/iptables
+  . /etc/default/iptables
 fi
 
 ################################################################################
+# init.d functions
+
 start() {
-    for i in $MODULES; do load_mod $i; done
+  for i in $MODULES; do load_mod $i; done
 
-    # Enable IP forwarding since it is disabled by default
-    echo "1" > /proc/sys/net/ipv4/ip_forward
-    action "Enabling forwarding" /bin/true
+  reset_iptables
 
-    reset_iptables
+  # Enable IP forwarding since it is disabled by default
+  action "Enabling forwarding" sysctl net.ipv4.ip_forward=0
 
-    # Local host
-    action "Enabling all input from localhost" \
-        $IPTABLES -A INPUT -i lo -j ACCEPT
+  # Local host
+  action "Enabling all input from localhost" \
+    iptables4and6 -A INPUT -i lo -j ACCEPT
 
-    # Ping
-    if [ "$PING" == "true" ]; then
-        action "Enabling IMCP ping" \
-        $IPTABLES -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
-    fi
+  # Ping
+  if [ "$PING" == "true" ]; then
+    action "Enabling IPv4 ping" \
+      $IPTABLES -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
 
-    # Close all blocked IPs
-    for ip in $BLOCKEDIPS; do
-        action "Disabling all input from $ip" $IPTABLES -A INPUT -s $ip -j DROP
-    done
+    action "Enabling IPv6 ping" \
+      $IP6TABLES -A INPUT -p ipv6-icmp --icmpv6-type echo-request -j ACCEPT
+  fi
 
-    # Open all on allowed IPs
-    for ip in $OPENIPS; do
-        action "Enabling all input from $ip" $IPTABLES -A INPUT -s $ip -j ACCEPT
-    done
+  # Close all blocked IPs
+  for ip in $BLOCKEDIPS; do
+    block_ip $ip
+  done
 
-    # Special local configs
-    start_local
+  # Open all on allowed IPs
+  for ip in $OPENIPS; do
+    allow_ip $ip
+  done
 
-    # Open allowed services to INPUT
-    for service in $OPENTCP; do
-      action "Enabling TCP $service input" \
-          $IPTABLES -A INPUT -p tcp --dport $service -j ACCEPT
-    done
-    for service in $OPENUDP; do
-      action "Enabling UDP $service input" \
-          $IPTABLES -A INPUT -p udp --dport $service -j ACCEPT
-    done
+  # local configs
+  start_local
 
-    # Allow related and established INPUT from the external interface
-    action "Enabling ESTABLISHED and RELATED input" \
-        $IPTABLES -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    
-    # Masqueraded devices
-    for i in $MASQIFS; do
-        masquerade $i $EXTIF
-    done
+  # Open allowed ports to INPUT
+  for PORT in $OPENTCP; do
+    allow_port TCP $PORT
+  done
+  for service in $OPENUDP; do
+    allow_port UDP $PORT
+  done
 
-    # Ignore DHCP broadcasts
-    action "Ignoring DHCP broadcasts" \
-        $IPTABLES -A INPUT -s 0.0.0.0 -d 255.255.255.255 -j DROP
+  # Allow related and established INPUT from the external interface
+  action "Enabling ESTABLISHED and RELATED input" \
+    iptables4and6 -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-    # Logging
-    if [ "$LOG" == "true" ]; then
-        action "Enabling logging" \
-            $IPTABLES -A INPUT -j LOG && \
-            $IPTABLES -A FORWARD -j LOG
-    fi
-    
-    # Drop all other INPUT
-    action "Dropping all remaining input" $IPTABLES -A INPUT -j DROP
+  # Masqueraded devices
+  for i in $MASQIFS; do
+    masquerade $i $EXTIF
+  done
+
+  # Ignore DHCP broadcasts
+  action "Ignoring IPv4 DHCP broadcasts" \
+    $IPTABLES -A INPUT -s 0.0.0.0 -d 255.255.255.255 -j DROP
+
+  # Logging
+  if [ "$LOG" == "true" ]; then
+    enable_log INPUT
+    enable_log FORWARD
+  fi
+
+  # Drop all other INPUT
+  action "Dropping all remaining input" iptables4and6 -A INPUT -j DROP
 }
 
-################################################################################
 stop() {
-    for i in $MODULES; do unload_mod $i; done
+  for i in $MODULES; do unload_mod $i; done
 
-    echo "0" > /proc/sys/net/ipv4/ip_forward
-    action "Disabling forwarding" /bin/true
+  action "Disabling forwarding" sysctl net.ipv4.ip_forward=0
 
-    reset_iptables
+  reset_iptables
+}
+
+status() {
+  print_bar IPv4
+  $IPTABLES  -vnL
+  echo
+  print_bar IPv6
+  $IP6TABLES -vnL
 }
 
 ################################################################################
 # Main switch statement
-#
-case "$1" in
-    start) start ;;
-    stop) stop ;;
-    restart) start ;;
-    status) $IPTABLES -vL ;;
 
-    *)
-      echo "Syntax: $0 <start | stop | restart | status>"
-      exit 1
-    ;;
+case "$1" in
+  start)   start  ;;
+  stop)    stop   ;;
+  restart) start  ;;
+  status)  status ;;
+
+  *)
+    echo "Syntax: $0 <start | stop | restart | status>"
+    exit 1
+  ;;
 esac

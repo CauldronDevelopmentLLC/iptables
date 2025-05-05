@@ -9,13 +9,24 @@ TRANSMISSION=51413
 OPENTCP="ssh $TRANSMISSION"
 OPENUDP="mdns"
 
-OPENIPS=
-BLOCKEDIPS=
+OPENIPS=192.168.0.10
+BLOCKEDIPS="45.161.82.170 209.85.215.200"
 
 PING=true
-LOG=true
+LOG=false
 
 start_local() {
-  allow_in TCP http 192.168.10.0/24
+  # Allow web traffic from specified local network
+  allow_in TCP http 192.168.0.0/24
+
   masquerade vmtap tun0
+
+  # Only allow web traffic over https from Cloudflare
+  for i in $(curl https://www.cloudflare.com/ips-v4 2>/dev/null); do
+    allow_in TCP https $i
+  done
+
+  for i in $(curl https://www.cloudflare.com/ips-v6 2>/dev/null); do
+    allow_in TCP https $i
+  done
 }
