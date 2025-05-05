@@ -1,0 +1,21 @@
+# This is an example configuration.  You should create your own.
+
+EXTIF="eth0"
+MASQIFS="tap0"
+
+# Unnamed ports can be defined like this for clarity
+TRANSMISSION=51413
+
+OPENTCP="ssh $TRANSMISSION"
+OPENUDP="mdns"
+
+OPENIPS=
+BLOCKEDIPS=
+
+PING=true
+LOG=true
+
+start_local() {
+  allow_in TCP http 192.168.10.0/24
+  masquerade vmtap tun0
+}

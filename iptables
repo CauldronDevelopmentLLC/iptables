@@ -1,0 +1,207 @@
+#!/bin/bash
+#
+#   Firewall configuration
+#     -Firewall external interface
+#
+#  Add to system with:
+#    sudo update-rc.d iptables defaults 13 87
+#
+#  Copyright: 2004-2010 Joseph Coffland
+################################################################################
+
+### BEGIN INIT INFO
+# Provides:          iptables-config
+# Required-Start:
+# Required-Stop:
+# X-Start-Before:    $network
+# X-Stop-After:      $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: A firewall script
+# Description:       A firewall script
+### END INIT INFO
+
+# Defaults
+
+EXTIF="eth0"
+MASQIFS=
+MODULES=
+OPENTCP=
+OPENUDP=
+OPENIPS=
+BLOCKEDIPS=
+
+PING=false
+LOG=false
+
+IPTABLES=/sbin/iptables
+
+start_local() {
+    true
+}
+
+################################################################################
+# Utility functions
+tabbed_print() {
+    X=$1
+    shift
+    X=$(($X + `echo $@ | wc -c`))
+    
+    while [ $X -lt 80 ]; do
+        echo -n " "
+        X=$(($X + 1))
+    done
+    echo $@
+}
+
+action() {
+    LEN=`echo -n $1 | wc -c`
+    echo -n $1
+    shift
+    $@ >/dev/null 2>/dev/null
+    if [ $? -eq 0 ]; then
+        tabbed_print $LEN OK
+    else
+        tabbed_print $LEN FAILED
+    fi
+}
+
+load_mod() {
+    /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
+    if test $? -ne 0; then
+	    action "Loading module: $1" /sbin/insmod $1
+    fi
+}
+
+unload_mod() {
+    /bin/grep $1 /proc/modules >/dev/null 2>/dev/null
+    if test $? -eq 0; then
+	    action "Unloading module: $1" /sbin/rmmod $1
+    fi
+}
+
+reset_iptables() {
+    action "Clearing any existing rules and setting default policy" \
+        $IPTABLES -P INPUT ACCEPT && \
+        $IPTABLES -F INPUT && \
+        $IPTABLES -P OUTPUT ACCEPT && \
+        $IPTABLES -F OUTPUT && \
+        $IPTABLES -P FORWARD DROP && \
+        $IPTABLES -F FORWARD && \
+        $IPTABLES -t nat -F
+    echo
+}
+
+# Syntax: allow_in <protocol> <port> <source>
+allow_in() {
+    action "Enabling $1 $2 input from $3" \
+        $IPTABLES -A INPUT -p "$1" --dport "$2" -s "$3" -j ACCEPT
+}
+
+# $1 is the internal interface to be masquraded
+# $2 is the external interface to the internet
+masquerade() {
+    action "Masquerading $1 -> $2" \
+        $IPTABLES -t nat -A POSTROUTING -o $2 -j MASQUERADE && \
+        $IPTABLES -A FORWARD -i $2 -o $1 -m state --state ESTABLISHED,RELATED \
+        -j ACCEPT && \
+        $IPTABLES -A FORWARD -i $1 -o $2 -j ACCEPT
+}
+
+################################################################################
+# Load config
+if [ -e /etc/default/iptables ]; then
+    . /etc/default/iptables
+fi
+
+################################################################################
+start() {
+    for i in $MODULES; do load_mod $i; done
+
+    # Enable IP forwarding since it is disabled by default
+    echo "1" > /proc/sys/net/ipv4/ip_forward
+    action "Enabling forwarding" /bin/true
+
+    reset_iptables
+
+    # Local host
+    action "Enabling all input from localhost" \
+        $IPTABLES -A INPUT -i lo -j ACCEPT
+
+    # Ping
+    if [ "$PING" == "true" ]; then
+        action "Enabling IMCP ping" \
+        $IPTABLES -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+    fi
+
+    # Close all blocked IPs
+    for ip in $BLOCKEDIPS; do
+        action "Disabling all input from $ip" $IPTABLES -A INPUT -s $ip -j DROP
+    done
+
+    # Open all on allowed IPs
+    for ip in $OPENIPS; do
+        action "Enabling all input from $ip" $IPTABLES -A INPUT -s $ip -j ACCEPT
+    done
+
+    # Special local configs
+    start_local
+
+    # Open allowed services to INPUT
+    for service in $OPENTCP; do
+      action "Enabling TCP $service input" \
+          $IPTABLES -A INPUT -p tcp --dport $service -j ACCEPT
+    done
+    for service in $OPENUDP; do
+      action "Enabling UDP $service input" \
+          $IPTABLES -A INPUT -p udp --dport $service -j ACCEPT
+    done
+
+    # Allow related and established INPUT from the external interface
+    action "Enabling ESTABLISHED and RELATED input" \
+        $IPTABLES -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Masqueraded devices
+    for i in $MASQIFS; do
+        masquerade $i $EXTIF
+    done
+
+    # Ignore DHCP broadcasts
+    action "Ignoring DHCP broadcasts" \
+        $IPTABLES -A INPUT -s 0.0.0.0 -d 255.255.255.255 -j DROP
+
+    # Logging
+    if [ "$LOG" == "true" ]; then
+        action "Enabling logging" \
+            $IPTABLES -A INPUT -j LOG && \
+            $IPTABLES -A FORWARD -j LOG
+    fi
+    
+    # Drop all other INPUT
+    action "Dropping all remaining input" $IPTABLES -A INPUT -j DROP
+}
+
+################################################################################
+stop() {
+    for i in $MODULES; do unload_mod $i; done
+
+    echo "0" > /proc/sys/net/ipv4/ip_forward
+    action "Disabling forwarding" /bin/true
+
+    reset_iptables
+}
+
+################################################################################
+# Main switch statement
+#
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) start ;;
+    status) $IPTABLES -vL ;;
+
+    *)
+      echo "Syntax: $0 <start | stop | restart | status>"
+      exit 1
+    ;;
+esac
